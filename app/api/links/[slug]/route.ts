@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { prisma } from "@/lib/prisma"
-import { linkCache } from "@/lib/api/links/cache"
+import { deleteLink } from "@/lib/api/links/delete-link"
 
 export async function DELETE(
   req: NextRequest,
@@ -8,29 +7,15 @@ export async function DELETE(
 ) {
   try {
     const { slug } = params
+    const result = await deleteLink(slug)
 
-    // 1. Check the link exists first
-    const link = await prisma.link.findUnique({
-      where: { slug },
-      select: { id: true },
-    })
-
-    if (!link) {
+    if ("error" in result) {
+      const status = result.code === "not_found" ? 404 : 500
       return NextResponse.json(
-        { error: { code: "not_found", message: "Link not found" } },
-        { status: 404 }
+        { error: { code: result.code, message: result.error } },
+        { status }
       )
     }
-
-    // 2. Delete from DB
-    // onDelete: Cascade in schema means all Click rows are deleted too
-    await prisma.link.delete({
-      where: { slug },
-    })
-
-    // 3. CRITICAL: Invalidate Redis cache
-    // Without this, the deleted link keeps redirecting for up to 24 hours
-    await linkCache.delete(slug)
 
     return NextResponse.json({ success: true }, { status: 200 })
   } catch (error) {

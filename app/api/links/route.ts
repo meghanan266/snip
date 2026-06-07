@@ -74,7 +74,7 @@ export async function GET() {
       id: link.id,
       url: link.url,
       slug: link.slug,
-      shortLink: process.env.NEXT_PUBLIC_APP_URL + "/" + link.slug,
+      shortLink: (process.env.NEXT_PUBLIC_APP_URL ?? "") + "/" + link.slug,
       expiresAt: link.expiresAt,
       createdAt: link.createdAt,
       totalClicks: link._count.clicks,

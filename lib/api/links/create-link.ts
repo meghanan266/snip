@@ -33,7 +33,7 @@ export async function createLink(link: ProcessedLink): Promise<CreatedLink> {
   })
 
   // 3. Build the full short link URL
-  const shortLink = `${process.env.NEXT_PUBLIC_APP_URL}/${created.slug}`
+  const shortLink = `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/${created.slug}`
 
   return {
     id: created.id,

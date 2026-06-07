@@ -1,21 +1,34 @@
 import { NextRequest, NextResponse } from "next/server"
 import { Receiver } from "@upstash/qstash"
-import { prisma } from "@/lib/prisma"
-import { parseUserAgent, parseReferrer } from "@/lib/parse-headers"
-import type { ClickEvent } from "@/lib/analytics"
+import { z } from "zod"
+import { ingestClick } from "@/lib/api/analytics/ingest-click"
 
-// Receiver verifies that requests genuinely came from QStash
-// and not from anyone else trying to inject fake click data
-const receiver = new Receiver({
-  currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY!,
-  nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY!,
+const clickEventSchema = z.object({
+  slug: z.string().min(1),
+  url: z.string().optional(),
+  country: z.string().optional(),
+  userAgent: z.string().optional(),
+  referrer: z.string().optional(),
+  timestamp: z.string().optional(),
 })
 
 export async function POST(req: NextRequest) {
+  // Validate signing keys are present before constructing Receiver
+  const currentSigningKey = process.env.QSTASH_CURRENT_SIGNING_KEY
+  const nextSigningKey = process.env.QSTASH_NEXT_SIGNING_KEY
+
+  if (!currentSigningKey || !nextSigningKey) {
+    console.error("[ingest] QSTASH signing keys are not set")
+    return NextResponse.json(
+      { error: { code: "internal_error", message: "Server misconfiguration" } },
+      { status: 500 }
+    )
+  }
+
+  // Receiver verifies that requests genuinely came from QStash
+  const receiver = new Receiver({ currentSigningKey, nextSigningKey })
+
   try {
-    // 1. Verify QStash signature
-    // QStash signs every request with a signature in the headers
-    // If verification fails this request did not come from QStash
     const body = await req.text()
     const signature = req.headers.get("upstash-signature")
 
@@ -26,12 +39,9 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const isValid = await receiver.verify({
-      signature,
-      body,
-      // clockTolerance allows for slight time differences between servers
-      clockTolerance: 60,
-    }).catch(() => false)
+    const isValid = await receiver
+      .verify({ signature, body, clockTolerance: 60 })
+      .catch(() => false)
 
     if (!isValid) {
       return NextResponse.json(
@@ -40,46 +50,21 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // 2. Parse the event payload
-    const event = JSON.parse(body) as ClickEvent
-
-    if (!event.slug) {
+    // Validate payload shape with Zod before touching the DB
+    const parsed = clickEventSchema.safeParse(JSON.parse(body))
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: { code: "validation_error", message: "Missing slug" } },
+        {
+          error: {
+            code: "validation_error",
+            message: parsed.error.errors[0].message,
+          },
+        },
         { status: 400 }
       )
     }
 
-    // 3. Find the link in the DB by slug
-    const link = await prisma.link.findUnique({
-      where: { slug: event.slug },
-      select: { id: true },
-    })
-
-    // 4. If link was deleted between the click and processing, skip silently
-    // Return 200 so QStash does not retry — the link is genuinely gone
-    if (!link) {
-      console.log(`[ingest] Link not found for slug: ${event.slug} — skipping`)
-      return NextResponse.json({ success: true }, { status: 200 })
-    }
-
-    // 5. Parse device and browser from user agent string
-    const { device, browser } = parseUserAgent(event.userAgent ?? "")
-
-    // 6. Normalize referrer to a clean domain name
-    const referrer = parseReferrer(event.referrer)
-
-    // 7. Write Click row to the database
-    await prisma.click.create({
-      data: {
-        linkId: link.id,
-        country: event.country ?? "Unknown",
-        device,
-        browser,
-        referrer,
-        timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
-      },
-    })
+    await ingestClick(parsed.data)
 
     return NextResponse.json({ success: true }, { status: 200 })
   } catch (error) {
